@@ -28,10 +28,25 @@ function view (table) {
     });
 }
 
-function add (table,columns,values) {
-    return new Promise((resolve) => {
+function add (table, columns, values) {
+    columns = columns.join(',');
+
+    // Map each value to a string representation of that value, correctly formatted for SQL.
+    values = values.map(value => {
+        if (typeof value === 'string') {
+            // Escape single quotes in the string to prevent SQL injection attacks.
+            value = value.replace(/'/g, "''");
+            return `'${value}'`;
+        }
+        return value;
+    }).join(',');
+
+    return new Promise((resolve, reject) => {
         db.query(`INSERT INTO ${table} (${columns}) VALUES (${values})`,(err,res) => {
-            if (err) throw err;
+            if (err) {
+                console.log('Error:', err);
+                return reject(err);
+            }
             console.log('Added');
             resolve();
         });
@@ -39,6 +54,9 @@ function add (table,columns,values) {
 }
 
 function update (table,columns,values,condition) {
+    if (typeof values === 'string') {
+        values = `'${values}'`;
+    }
     return new Promise((resolve) => {
         db.query(`UPDATE ${table} SET ${columns} = ${values} WHERE ${condition}`,(err,res) => {
             if (err) throw err;
@@ -56,6 +74,28 @@ function del (table,condition) {
             resolve();
         });
     });
+}
+
+// Handle menu
+async function handleMenu(query, itemName, promptName) {
+    // Get possible items
+    let items = await new Promise((resolve) => {
+        db.query(query,(err,res) => {
+            if (err) throw err;
+            resolve(res);
+        });
+    });
+    // Create a string of possible items
+    let itemMenu = `Select a ${promptName}:\n`;
+    for (let i = 0; i < items.length; i++) {
+        itemMenu += `${i + 1}. ${items[i][itemName]}\n`;
+    }
+    // Get item id
+    let itemId = await cli.handle(itemMenu,(answer) => {
+        return answer.length > 0 && !isNaN(answer) && answer > 0 && answer <= items.length;
+    });
+    // Return item id to values
+    return items[itemId - 1].id;
 }
 
 // Executes after dbPromise resolves
@@ -86,67 +126,136 @@ function main (tables,mainMenu) {
         // Greater than 0, valid number, less than or equal to number of tables
         return answer.length > 0 && !isNaN(answer) && answer > 0 && answer <= tables.length;
     }).then((answer) => {
-        console.log(`Selected ${tables[answer - 1]}`);
-        return tables[answer - 1];
-    }).then((table) => {
-        cli.handle('Select an action:\n1. View\n2. Add\n3. Update\n4. Delete\n',(answer) => {
-            return answer.length > 0 && !isNaN(answer) && answer > 0 && answer <= 4;
+        let table = tables[answer - 1];
+        cli.handle(`Select an action for ${table}:\n1. View\n2. Add\n3. Update\n4. Delete\n`,(answer) => {
+            return answer.length > 0 && !isNaN(answer) && answer > 0 && answer <= 5;
         }).then((answer) => {
+            
+            // Switch thru view, add, update, delete
             switch (answer) {
-
-                // View
+                //View
                 case '1':
-                    return cli.handle('Select a column to sort by:\n',(column) => {
-                        return column.length > 0 && !isNaN(column) && column > 0 && column <= tables.length;
-                    }).then((column) => {
-                        return view(table,tables[column - 1]);
+                    view(table).then(() => {
+                        main(tables,mainMenu);
                     });
-                
+                    break;
                 // Add
                 case '2':
-                    return cli.handle('Select a column to add to:\n',(column) => {
-                        return column.length > 0 && !isNaN(column) && column > 0 && column <= tables.length;
-                    }).then((column) => {
-                        return cli.handle('Enter a value:\n',(value) => {
-                            return true;
-                        }).then((value) => {
-                            return add(table,tables[column - 1],value);
+                    // Get columns
+                    columnPromise = new Promise((resolve) => {
+                        db.query(`SHOW COLUMNS FROM ${table}`,(err,res) => {
+                            if (err) throw err;
+                            let columns = [];
+                            // i = 1 to skip id column
+                            for (let i = 1; i < res.length; i++) {
+                                columns[i-1] = res[i].Field;
+                            }
+                            resolve(columns);
                         });
-                    }).then(() => {
-                        console.log('Added');
                     });
-                
+                    columnPromise.then(async (columns) => {
+                        // Get values
+                        let values = [];
+                        for (let i = 0; i < columns.length; i++) {
+                            switch (columns[i]) {
+                                case 'department_id':
+                                    values[i] = await handleMenu('SELECT * FROM departments','name','department');
+                                    break;
+                                case 'role_id':
+                                    values[i] = await handleMenu('SELECT * FROM roles','title','role');
+                                    break;
+                                case 'manager_id':
+                                    values[i] = await handleMenu('SELECT * FROM employees','first_name','manager');
+                                    break;
+                                default:
+                                    values[i] = await cli.handle(`Enter ${columns[i]}:`,(answer) => {
+                                        return answer.length > 0;
+                                    });
+                                    break;
+                            }
+                        }
+                        // Add
+                        add(table,columns,values).then(() => {
+                            main(tables,mainMenu);
+                        });
+                    });
+                    break;
                 // Update
                 case '3':
-                    return cli.handle('Select a column to update:\n',(column) => {
-                        return column.length > 0 && !isNaN(column) && column > 0 && column <= tables.length;
-                    }).then((column) => {
-                        return cli.handle('Enter a value:\n',(value) => {
-                            return true;
-                        }).then((value) => {
-                            return update(table,tables[column - 1],value);
+                    // Show items from table but use item to select id
+                    columnPromise = new Promise((resolve) => {
+                        db.query(`SHOW COLUMNS FROM ${table}`,(err,res) => {
+                            if (err) throw err;
+                            let columns = [];
+                            for (let i = 0; i < res.length; i++) {
+                                columns[i] = res[i].Field;
+                            }
+                            resolve(columns);
                         });
-                    }).then(() => {
-                        console.log('Updated');
                     });
-
+                    columnPromise.then(async (columns) => {
+                        // Get id
+                        let id = await handleMenu(`SELECT * FROM ${table}`,columns[1],table);
+                        // Get columns
+                        let columnsMenu = `Select a column to update:\n`;
+                        // i = 1 to skip id column
+                        for (let i = 1; i < columns.length; i++) {
+                            columnsMenu += `${i}. ${columns[i]}\n`;
+                        }
+                        let columnId = await cli.handle(columnsMenu,(answer) => {
+                            return answer.length > 0 && !isNaN(answer) && answer > 0 && answer <= columns.length;
+                        });
+                        // Get value
+                        let value;
+                        switch (columns[columnId]) {
+                            case 'department_id':
+                                value = await handleMenu('SELECT * FROM departments','name','department');
+                                break;
+                            case 'role_id':
+                                value = await handleMenu('SELECT * FROM roles','title','role');
+                                break;
+                            case 'manager_id':
+                                value = await handleMenu('SELECT * FROM employees','first_name','manager');
+                                break;
+                            default:
+                                value = await cli.handle(`Enter ${columns[columnId]}:`,(answer) => {
+                                    return answer.length > 0;
+                                });
+                                break;
+                        }
+                        // Update
+                        update(table,columns[columnId],value,`id = ${id}`).then(() => {
+                            main(tables,mainMenu);
+                        });
+                    });
+                    break;
                 // Delete
                 case '4':
-                    return cli.handle('Select a column to delete from:\n',(column) => {
-                        return column.length > 0 && !isNaN(column) && column > 0 && column <= tables.length;
-                    }).then((column) => {
-                        return cli.handle('Enter a value:\n',(value) => {
-                            return true;
-                        }).then((value) => {
-                            return del(table,tables[column - 1],value);
+                    // Show items from table but use item to select id
+                    columnPromise = new Promise((resolve) => {
+                        db.query(`SHOW COLUMNS FROM ${table}`,(err,res) => {
+                            if (err) throw err;
+                            let columns = [];
+                            for (let i = 0; i < res.length; i++) {
+                                columns[i] = res[i].Field;
+                            }
+                            resolve(columns);
                         });
-                    }).then(() => {
-                        console.log('Deleted');
                     });
+                    columnPromise.then(async (columns) => {
+                        // Get id
+                        let id = await handleMenu(`SELECT * FROM ${table}`,columns[1],table);
+                        // Delete
+                        del(table,`id = ${id}`).then(() => {
+                            main(tables,mainMenu);
+                        });
+                    });
+                    break;
+                // wtf????
+                default:
+                    console.log('How did you get here?');
+                    break;
             }
         });
-    }).then(() => {
-        // Main loop once finished
-        main(tables,mainMenu);
     });
 }
